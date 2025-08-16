@@ -1,0 +1,53 @@
+{
+  "groups": {
+    "-1002571674191": {
+      "group_id": -1002571674191,
+      "group_title": "Samandar | UK | GLOBUz",
+      "group_type": "supergroup",
+      "joined_at": "2025-08-13T09:04:50.014804+05:00",
+      "is_active": true,
+      "admin_ids": [
+        8214075520,
+        1066137436
+      ],
+      "last_updated": "2025-08-16T20:38:28.718179+05:00"
+    },
+    "-1002601746691": {
+      "group_id": -1002601746691,
+      "group_title": "Samandar",
+      "group_type": "supergroup",
+      "joined_at": "2025-08-16T22:43:35.092882+05:00",
+      "is_active": true,
+      "admin_ids": [
+        7848302787,
+        1066137436
+      ],
+      "last_updated": "2025-08-16T22:43:35.092922+05:00"
+    },
+    "-1002816907697": {
+      "group_id": -1002816907697,
+      "group_title": "GLOBUZ VIZA",
+      "group_type": "supergroup",
+      "joined_at": "2025-08-13T09:23:07.161109+05:00",
+      "is_active": true,
+      "admin_ids": [
+        7433787977,
+        7848302787,
+        1066137436
+      ],
+      "last_updated": "2025-08-16T22:43:35.094181+05:00"
+    },
+    "-1002840872790": {
+      "group_id": -1002840872790,
+      "group_title": "Botni test qilyapmiz | Schengen | GLOBUZ",
+      "group_type": "supergroup",
+      "joined_at": "2025-08-13T10:43:11.123361+05:00",
+      "is_active": true,
+      "admin_ids": [
+        8214075520,
+        36281036
+      ],
+      "last_updated": "2025-08-16T20:38:17.176515+05:00"
+    }
+  }
+}

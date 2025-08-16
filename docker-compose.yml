@@ -1,0 +1,10 @@
+
+services:
+  visa-bot:
+    build: .
+    restart: unless-stopped
+    environment:
+      - BOT_TOKEN=8214075520:AAH2NuC9spv7D8up4dFJnW8PariCeSrf0aM
+    volumes:
+      - ./data:/root/data
+# 8214075520:AAH2NuC9spv7D8up4dFJnW8PariCeSrf0aM

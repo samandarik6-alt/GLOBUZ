@@ -266,7 +266,7 @@ func updateGroupAdmins(groupID int64) {
 	}
 }
 
-// Admin ekanligini tekshirish (username asosida)
+// // Admin ekanligini tekshirish (username asosida)
 func isAdminMessage(username string, groupID int64) bool {
 	// Username asosida admin tekshirish - "globuz" yoki "GLOBUZ" bo'lsa admin
 	if username != "" {
@@ -314,7 +314,6 @@ func checkAndSendReminders() {
 func sendAdminReminder(pendingMsg *PendingMessage) {
 	// Find matching chat config
 	matchingConfig := findMatchingChatConfig(pendingMsg.GroupTitle, pendingMsg.Text)
-
 	if matchingConfig == nil {
 		log.Printf("❌ %s guruh yoki '%s' matn uchun mos chat config topilmadi", pendingMsg.GroupTitle, pendingMsg.Text)
 		return
@@ -353,7 +352,8 @@ Iltimos tezroq javob bering!
 			tgbotapi.NewInlineKeyboardButtonURL("📝 Javob berish", messageLink),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Javob berildi", fmt.Sprintf("answered_%d_%d", pendingMsg.GroupID, pendingMsg.MessageID)),
+			tgbotapi.NewInlineKeyboardButtonData("✅ Javob berildi",
+				fmt.Sprintf("answered_%d_%d", pendingMsg.GroupID, pendingMsg.MessageID)),
 		),
 	)
 
@@ -424,14 +424,28 @@ func main() {
 	updates := bot.GetUpdatesChan(u)
 
 	for update := range updates {
-		if update.Message != nil {
-			handleMessage(update.Message)
-		} else if update.CallbackQuery != nil {
-			handleCallbackQuery(update.CallbackQuery)
-		} else if update.MyChatMember != nil {
-			handleChatMemberUpdate(update.MyChatMember)
+		if update.CallbackQuery != nil {
+			data := update.CallbackQuery.Data
+
+			if strings.HasPrefix(data, "answered_") {
+
+				deleteMsg := tgbotapi.DeleteMessageConfig{
+					ChatID:    update.CallbackQuery.Message.Chat.ID,
+					MessageID: update.CallbackQuery.Message.MessageID,
+				}
+
+				if _, err := bot.Request(deleteMsg); err != nil {
+					log.Println("❌ Xabarni o‘chirishda xato:", err)
+				}
+
+				callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "Xabar o‘chirildi ✅")
+				if _, err := bot.Request(callback); err != nil {
+					log.Println("❌ Callback error:", err)
+				}
+			}
 		}
 	}
+
 }
 
 // Bot guruhga qo'shilganda yoki chiqarilganda

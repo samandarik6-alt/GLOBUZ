@@ -266,7 +266,7 @@ func updateGroupAdmins(groupID int64) {
 	}
 }
 
-// // Admin ekanligini tekshirish (username asosida)
+// Admin ekanligini tekshirish (username asosida)
 func isAdminMessage(username string, groupID int64) bool {
 	// Username asosida admin tekshirish - "globuz" yoki "GLOBUZ" bo'lsa admin
 	if username != "" {
@@ -312,7 +312,6 @@ func checkAndSendReminders() {
 
 // Adminlarga eslatma yuborish - guruh topiciga
 func sendAdminReminder(pendingMsg *PendingMessage) {
-	// Find matching chat config
 	matchingConfig := findMatchingChatConfig(pendingMsg.GroupTitle, pendingMsg.Text)
 	if matchingConfig == nil {
 		log.Printf("❌ %s guruh yoki '%s' matn uchun mos chat config topilmadi", pendingMsg.GroupTitle, pendingMsg.Text)
@@ -320,7 +319,7 @@ func sendAdminReminder(pendingMsg *PendingMessage) {
 	}
 
 	messageLink := fmt.Sprintf("https://t.me/c/%d/%d",
-		-pendingMsg.GroupID-1000000000000, // Convert original group ID to positive number for link
+		-pendingMsg.GroupID-1000000000000,
 		pendingMsg.MessageID)
 
 	reminderText := fmt.Sprintf(`⚠️ JAVOBSIZ XABAR! (%d-ESLATMA)
@@ -352,8 +351,10 @@ Iltimos tezroq javob bering!
 			tgbotapi.NewInlineKeyboardButtonURL("📝 Javob berish", messageLink),
 		),
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Javob berildi",
-				fmt.Sprintf("answered_%d_%d", pendingMsg.GroupID, pendingMsg.MessageID)),
+			tgbotapi.NewInlineKeyboardButtonData(
+				"✅ Javob berildi",
+				fmt.Sprintf("answered_%d", pendingMsg.MessageID),
+			),
 		),
 	)
 
@@ -423,12 +424,22 @@ func main() {
 
 	updates := bot.GetUpdatesChan(u)
 
+	// for update := range updates {
+	// 	if update.Message != nil {
+	// 		handleMessage(update.Message)
+	// 	} else if update.CallbackQuery != nil {
+	// 		handleCallbackQuery(update.CallbackQuery)
+	// 	} else if update.MyChatMember != nil {
+	// 		handleChatMemberUpdate(update.MyChatMember)
+	// 	}
+	// }
+
 	for update := range updates {
-		if update.CallbackQuery != nil {
-			data := update.CallbackQuery.Data
+		if update.Message != nil {
+			handleMessage(update.Message)
 
-			if strings.HasPrefix(data, "answered_") {
-
+		} else if update.CallbackQuery != nil {
+			if strings.HasPrefix(update.CallbackQuery.Data, "answered_") {
 				deleteMsg := tgbotapi.DeleteMessageConfig{
 					ChatID:    update.CallbackQuery.Message.Chat.ID,
 					MessageID: update.CallbackQuery.Message.MessageID,
@@ -438,11 +449,17 @@ func main() {
 					log.Println("❌ Xabarni o‘chirishda xato:", err)
 				}
 
-				callback := tgbotapi.NewCallback(update.CallbackQuery.ID, "Xabar o‘chirildi ✅")
-				if _, err := bot.Request(callback); err != nil {
+				callbackResp := tgbotapi.NewCallback(update.CallbackQuery.ID, "Xabar o‘chirildi ✅")
+				if _, err := bot.Request(callbackResp); err != nil {
 					log.Println("❌ Callback error:", err)
 				}
+				continue
 			}
+
+			handleCallbackQuery(update.CallbackQuery)
+
+		} else if update.MyChatMember != nil {
+			handleChatMemberUpdate(update.MyChatMember)
 		}
 	}
 

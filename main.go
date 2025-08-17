@@ -1,16 +1,13 @@
 package main
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
 	"log"
-	"net/http"
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -19,19 +16,12 @@ import (
 // Konstantalar
 const (
 	BOT_TOKEN         = "8214075520:AAH2NuC9spv7D8up4dFJnW8PariCeSrf0aM"
-	REMINDER_DELAY    = 10 * time.Second
+	REMINDER_DELAY    = 5 * time.Second
 	PENDING_JSON_FILE = "pending_messages.json"
 	GROUPS_JSON_FILE  = "groups.json"
-	CHAT_CONFIG_FILE  = "chat_config.json" // Added chat config file constant
+	TOPICS_JSON_FILE  = "topics.json"
+	ADMIN_CHAT_ID     = -1002816907697 // Adminlar guruhi - bu yerdan xabar olmaydi
 )
-
-// Global adminlar ro'yxati - username asosida
-var ADMIN_USERNAMES = []string{
-	"globuz",
-	"globuz_admin",
-	"globuz_super",
-	"admin_globuz",
-}
 
 // Strukturalar
 type VisaInfo struct {
@@ -58,18 +48,19 @@ type UserSession struct {
 }
 
 type PendingMessage struct {
-	MessageID     int       `json:"message_id"`
-	GroupID       int64     `json:"group_id"`
-	GroupTitle    string    `json:"group_title"`
-	UserID        int64     `json:"user_id"`
-	Username      string    `json:"username"`
-	Text          string    `json:"text"`
-	Timestamp     time.Time `json:"timestamp"`
-	LastReminder  time.Time `json:"last_reminder"`
-	ReminderCount int       `json:"reminder_count"`
-	Status        string    `json:"status"` // "pending", "answered", "ignored"
-	AnsweredBy    int64     `json:"answered_by,omitempty"`
-	AnsweredAt    time.Time `json:"answered_at,omitempty"`
+	MessageID          int           `json:"message_id"`
+	GroupID            int64         `json:"group_id"`
+	GroupTitle         string        `json:"group_title"`
+	UserID             int64         `json:"user_id"`
+	Username           string        `json:"username"`
+	Text               string        `json:"text"`
+	Timestamp          time.Time     `json:"timestamp"`
+	LastReminder       time.Time     `json:"last_reminder"`
+	ReminderCount      int           `json:"reminder_count"`
+	Status             string        `json:"status"` // "pending", "answered", "ignored"
+	AnsweredBy         int64         `json:"answered_by,omitempty"`
+	AnsweredAt         time.Time     `json:"answered_at,omitempty"`
+	ReminderMessageIDs map[int64]int `json:"reminder_message_ids,omitempty"` // adminID -> messageID
 }
 
 type GroupInfo struct {
@@ -90,22 +81,25 @@ type GroupsData struct {
 	Groups map[string]*GroupInfo `json:"groups"`
 }
 
-type ChatConfig struct {
+// Topic ma'lumotlari
+type TopicInfo struct {
 	ChatID          int64  `json:"chat_id"`
 	MessageThreadID int    `json:"message_thread_id"`
 	Text            string `json:"text"`
+}
+
+type TopicsData struct {
+	Topics []TopicInfo `json:"topics"`
 }
 
 // Global o'zgaruvchilar
 var (
 	bot             *tgbotapi.BotAPI
 	sessions        = make(map[int64]*UserSession)
-	pendingMessages []*PendingMessage
+	pendingMessages = make(map[int]*PendingMessage)
 	monitoredGroups = make(map[int64]*GroupInfo)
-	chatConfigs     []ChatConfig
+	topicsList      = []TopicInfo{}
 )
-
-var pendingMessagesMutex sync.Mutex
 
 // JSON fayldan pending messages yuklash
 func loadPendingMessages() {
@@ -127,8 +121,9 @@ func loadPendingMessages() {
 		return
 	}
 
-	for _, msg := range pendingData.Messages {
-		pendingMessages = append(pendingMessages, msg)
+	for msgIDStr, msg := range pendingData.Messages {
+		msgID, _ := strconv.Atoi(msgIDStr)
+		pendingMessages[msgID] = msg
 	}
 
 	log.Printf("✅ %d ta javobsiz xabar yuklandi", len(pendingMessages))
@@ -140,8 +135,8 @@ func savePendingMessages() {
 		Messages: make(map[string]*PendingMessage),
 	}
 
-	for _, msg := range pendingMessages {
-		pendingData.Messages[strconv.Itoa(msg.MessageID)] = msg
+	for msgID, msg := range pendingMessages {
+		pendingData.Messages[strconv.Itoa(msgID)] = msg
 	}
 
 	data, err := json.MarshalIndent(pendingData, "", "  ")
@@ -266,26 +261,27 @@ func updateGroupAdmins(groupID int64) {
 	}
 }
 
-// Admin ekanligini tekshirish (username asosida)
+// Admin ekanligini tekshirish (username orqali)
 func isAdminMessage(username string, groupID int64) bool {
-	// Username asosida admin tekshirish - "globuz" yoki "GLOBUZ" bo'lsa admin
-	if username != "" {
-		lowerUsername := strings.ToLower(username)
-		if strings.Contains(lowerUsername, "globuz") {
-			return true
-		}
+	// Username bo'lmasa false
+	if username == "" {
+		return false
 	}
+
+	// Username da "globuz" so'zi borligini tekshirish
+	if strings.Contains(strings.ToLower(username), "globuz") {
+		return true
+	}
+
 	return false
 }
 
 // Eslatmalarni tekshirish va yuborish
 func checkAndSendReminders() {
 	now := time.Now()
+	log.Printf("🔍 Eslatmalar tekshirilmoqda... Jami pending: %d", len(pendingMessages))
 
-	pendingMessagesMutex.Lock()
-	defer pendingMessagesMutex.Unlock()
-
-	for _, pendingMsg := range pendingMessages {
+	for msgID, pendingMsg := range pendingMessages {
 		if pendingMsg.Status != "pending" {
 			continue // Faqat javobsiz xabarlar uchun
 		}
@@ -297,11 +293,14 @@ func checkAndSendReminders() {
 
 		if pendingMsg.ReminderCount == 0 && timeSinceMessage >= REMINDER_DELAY {
 			shouldSendReminder = true
+			log.Printf("⏰ Birinchi eslatma vaqti keldi: MSG %d (%v o'tdi)", msgID, timeSinceMessage)
 		} else if pendingMsg.ReminderCount > 0 && timeSinceLastReminder >= REMINDER_DELAY {
 			shouldSendReminder = true
+			log.Printf("⏰ Keyingi eslatma vaqti keldi: MSG %d (%v o'tdi)", msgID, timeSinceLastReminder)
 		}
 
 		if shouldSendReminder {
+			log.Printf("📤 Eslatma yuborilmoqda: MSG %d", msgID)
 			sendAdminReminder(pendingMsg)
 			pendingMsg.LastReminder = now
 			pendingMsg.ReminderCount++
@@ -310,22 +309,104 @@ func checkAndSendReminders() {
 	}
 }
 
-// Adminlarga eslatma yuborish - guruh topiciga
-func sendAdminReminder(pendingMsg *PendingMessage) {
-	matchingConfig := findMatchingChatConfig(pendingMsg.GroupTitle, pendingMsg.Text)
-	if matchingConfig == nil {
-		log.Printf("❌ %s guruh yoki '%s' matn uchun mos chat config topilmadi", pendingMsg.GroupTitle, pendingMsg.Text)
-		return
+// Guruh nomidan davlat nomlarini aniqlash
+func extractCountriesFromGroupTitle(groupTitle string) []string {
+	var countries []string
+
+	// | belgisi bilan bo'lingan qismlarni tekshirish
+	parts := strings.Split(groupTitle, "|")
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+
+		// Har bir qismni topiclar bilan solishtirish
+		for _, topic := range topicsList {
+			if strings.EqualFold(part, topic.Text) {
+				countries = append(countries, topic.Text)
+			}
+		}
+
+		// # belgisidan keyin davlat nomlarini ham qidirish
+		if strings.HasPrefix(part, "#") {
+			country := strings.TrimPrefix(part, "#")
+			country = strings.TrimSpace(country)
+
+			// Topiclar bilan solishtirish
+			for _, topic := range topicsList {
+				if strings.EqualFold(country, topic.Text) {
+					countries = append(countries, topic.Text)
+				}
+			}
+		}
 	}
 
-	messageLink := fmt.Sprintf("https://t.me/c/%d/%d",
-		-pendingMsg.GroupID-1000000000000,
-		pendingMsg.MessageID)
+	return countries
+}
+
+// Xabar matnidan davlat nomini topish
+func findCountryInText(text string) string {
+	// Avval xabar matnidan qidirish
+	for _, topic := range topicsList {
+		if strings.Contains(strings.ToLower(text), strings.ToLower(topic.Text)) {
+			return topic.Text
+		}
+	}
+
+	return ""
+}
+
+// Guruh nomidan davlat nomini topish
+func findCountryFromGroupTitle(groupTitle string) string {
+	countries := extractCountriesFromGroupTitle(groupTitle)
+	if len(countries) > 0 {
+		return countries[0]
+	}
+	return ""
+}
+
+// Davlat nomi bo'yicha topic ID topish
+func findTopicByCountry(country string) *TopicInfo {
+	for _, topic := range topicsList {
+		if strings.EqualFold(topic.Text, country) {
+			return &topic
+		}
+	}
+	return nil
+}
+
+// Adminlarga eslatma yuborish - TO'G'RILANGAN VERSIYA
+func sendAdminReminder(pendingMsg *PendingMessage) {
+	log.Printf("🔔 Adminlarga eslatma yuborilmoqda: MSG %d", pendingMsg.MessageID)
+
+	// Avval xabar matnidan davlat nomini topish
+	country := findCountryInText(pendingMsg.Text)
+
+	// Agar xabar matnidan topa olmasa, guruh nomidan qidirish
+	if country == "" {
+		country = findCountryFromGroupTitle(pendingMsg.GroupTitle)
+	}
+
+	// Agar hali ham topilmasa
+	if country == "" {
+		country = "Aniqlanmadi"
+	}
+
+	// Topic topish
+	topic := findTopicByCountry(country)
+	var targetChatID int64 = pendingMsg.GroupID
+	var targetThreadID int = 0
+
+	if topic != nil {
+		targetChatID = topic.ChatID
+		targetThreadID = topic.MessageThreadID
+		log.Printf("🎯 Topic topildi: %s -> Chat: %d, Thread: %d", country, targetChatID, targetThreadID)
+	} else {
+		log.Printf("❌ Topic topilmadi davlat uchun: %s, asl guruhga yuboriladi", country)
+	}
 
 	reminderText := fmt.Sprintf(`⚠️ JAVOBSIZ XABAR! (%d-ESLATMA)
 
 🏢 Guruh: %s
-🆔 Guruh ID: %d
+📍 Davlat: %s
 👤 Foydalanuvchi: @%s (ID: %d)
 ⏰ Xabar vaqti: %s
 📝 Xabar matni: "%s"
@@ -333,50 +414,96 @@ func sendAdminReminder(pendingMsg *PendingMessage) {
 🔔 %s dan beri javob kutmoqda!
 ⏱️ Jami eslatmalar: %d
 
-Iltimos tezroq javob bering!
-%s`,
+Iltimos tezroq javob bering!`,
 		pendingMsg.ReminderCount+1,
 		pendingMsg.GroupTitle,
-		pendingMsg.GroupID,
+		country,
 		pendingMsg.Username,
 		pendingMsg.UserID,
 		pendingMsg.Timestamp.Format("02.01.2006 15:04:05"),
 		pendingMsg.Text,
 		formatDuration(time.Since(pendingMsg.Timestamp)),
-		pendingMsg.ReminderCount,
-		messageLink)
+		pendingMsg.ReminderCount)
 
+	// ReminderMessageIDs ni initialize qilish
+	if pendingMsg.ReminderMessageIDs == nil {
+		pendingMsg.ReminderMessageIDs = make(map[int64]int)
+	}
+
+	// Topicga xabar yuborish
+	msg := tgbotapi.NewMessage(targetChatID, reminderText)
+
+	// Forum topic thread ID ni qo'shish
+	if targetThreadID > 0 {
+		// Qo'lda MessageThreadID ni o'rnatish
+		msgWithThread := tgbotapi.MessageConfig{
+			BaseChat: tgbotapi.BaseChat{
+				ChatID:           targetChatID,
+				ReplyToMessageID: targetThreadID,
+			},
+			Text: reminderText,
+		}
+		msg = msgWithThread
+	}
+
+	// "Javob berildi" tugmasini qo'shish
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonURL("📝 Javob berish", messageLink),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData(
-				"✅ Javob berildi",
-				fmt.Sprintf("answered_%d", pendingMsg.MessageID),
-			),
+			tgbotapi.NewInlineKeyboardButtonData("✅ Javob berildi", fmt.Sprintf("mark_answered_%d", pendingMsg.MessageID)),
 		),
 	)
+	msg.ReplyMarkup = keyboard
 
-	err := sendMessageWithThread(matchingConfig.ChatID, matchingConfig.MessageThreadID, reminderText, &keyboard)
+	sentMsg, err := bot.Send(msg)
 	if err != nil {
-		log.Printf("❌ Guruh topiciga (%d, thread: %d) eslatma yuborishda xato: %v",
-			matchingConfig.ChatID, matchingConfig.MessageThreadID, err)
+		log.Printf("❌ Topicga eslatma yuborishda xato: %v", err)
 	} else {
-		log.Printf("✅ Eslatma yuborildi: Guruh %d, Topic %d",
-			matchingConfig.ChatID, matchingConfig.MessageThreadID)
+		// Topic message ID ni saqlash
+		pendingMsg.ReminderMessageIDs[targetChatID] = sentMsg.MessageID
+		log.Printf("✅ Topic %d ga eslatma yuborildi (MSG ID: %d)", targetThreadID, sentMsg.MessageID)
 	}
+
+	log.Printf("🎯 Eslatma yuborish tugallandi: MSG %d", pendingMsg.MessageID)
 }
 
 // Vaqt formatini chiroyli ko'rsatish
 func formatDuration(d time.Duration) string {
-	minutes := int(d.Minutes())
+	seconds := int(d.Seconds())
+	if seconds < 60 {
+		return fmt.Sprintf("%d soniya", seconds)
+	}
+	minutes := seconds / 60
+	remainingSeconds := seconds % 60
 	if minutes < 60 {
-		return fmt.Sprintf("%d daqiqa", minutes)
+		return fmt.Sprintf("%d daqiqa %d soniya", minutes, remainingSeconds)
 	}
 	hours := minutes / 60
 	remainingMinutes := minutes % 60
 	return fmt.Sprintf("%d soat %d daqiqa", hours, remainingMinutes)
+}
+
+// JSON fayldan topiclar ma'lumotini yuklash
+func loadTopics() {
+	// Hardcoded topics ma'lumotlari
+	topicsList = []TopicInfo{
+		{ChatID: -1002816907697, MessageThreadID: 2, Text: "UK"},
+		{ChatID: -1002816907697, MessageThreadID: 4, Text: "Schengen"},
+		{ChatID: -1002816907697, MessageThreadID: 6, Text: "Australia"},
+		{ChatID: -1002816907697, MessageThreadID: 8, Text: "Japan"},
+		{ChatID: -1002816907697, MessageThreadID: 10, Text: "Peru"},
+		{ChatID: -1002816907697, MessageThreadID: 12, Text: "India"},
+		{ChatID: -1002816907697, MessageThreadID: 14, Text: "Argentina"},
+		{ChatID: -1002816907697, MessageThreadID: 16, Text: "Uganda"},
+		{ChatID: -1002816907697, MessageThreadID: 18, Text: "Kuwait"},
+		{ChatID: -1002816907697, MessageThreadID: 20, Text: "Pakistan"},
+		{ChatID: -1002816907697, MessageThreadID: 22, Text: "Albania"},
+		{ChatID: -1002816907697, MessageThreadID: 24, Text: "Hong Kong"},
+		{ChatID: -1002816907697, MessageThreadID: 26, Text: "Ireland"},
+		{ChatID: -1002816907697, MessageThreadID: 28, Text: "Cyprus"},
+		{ChatID: -1002816907697, MessageThreadID: 30, Text: "Zimbabwe"},
+	}
+
+	log.Printf("✅ %d ta topic yuklandi", len(topicsList))
 }
 
 // Asosiy main funksiya
@@ -389,27 +516,21 @@ func main() {
 
 	bot.Debug = true
 	log.Printf("🚀 Bot %s ga ulanildi", bot.Self.UserName)
-	log.Printf("👨‍💼 Global admin usernames: %v", ADMIN_USERNAMES)
 
 	// JSON fayllardan ma'lumotlarni yuklash
 	loadPendingMessages()
 	loadGroups()
-	loadChatConfigs() // Load chat configurations
+	loadTopics()
 
 	log.Printf("📊 Kuzatilayotgan guruhlar: %d ta", len(monitoredGroups))
-	for groupID, group := range monitoredGroups {
-		log.Printf("  - %s (ID: %d, Adminlar: %d ta)", group.GroupTitle, groupID, len(group.AdminIDs))
-	}
+	log.Printf("📋 Mavjud topiclar: %d ta", len(topicsList))
 
-	log.Printf("📋 Chat konfiguratsiyalar: %d ta", len(chatConfigs))
-	for _, config := range chatConfigs {
-		log.Printf("  - %s -> Chat ID: %d, Topic ID: %d", config.Text, config.ChatID, config.MessageThreadID)
-	}
-
-	// Har daqiqada eslatmalarni tekshirish
+	// Har 30 soniyada eslatmalarni tekshirish (test uchun)
 	go func() {
-		ticker := time.NewTicker(1 * time.Minute)
+		ticker := time.NewTicker(30 * time.Second)
 		defer ticker.Stop()
+
+		log.Printf("⏰ Eslatma timer boshlandi (har 30 soniyada)")
 
 		for {
 			select {
@@ -424,45 +545,15 @@ func main() {
 
 	updates := bot.GetUpdatesChan(u)
 
-	// for update := range updates {
-	// 	if update.Message != nil {
-	// 		handleMessage(update.Message)
-	// 	} else if update.CallbackQuery != nil {
-	// 		handleCallbackQuery(update.CallbackQuery)
-	// 	} else if update.MyChatMember != nil {
-	// 		handleChatMemberUpdate(update.MyChatMember)
-	// 	}
-	// }
-
 	for update := range updates {
 		if update.Message != nil {
 			handleMessage(update.Message)
-
 		} else if update.CallbackQuery != nil {
-			if strings.HasPrefix(update.CallbackQuery.Data, "answered_") {
-				deleteMsg := tgbotapi.DeleteMessageConfig{
-					ChatID:    update.CallbackQuery.Message.Chat.ID,
-					MessageID: update.CallbackQuery.Message.MessageID,
-				}
-
-				if _, err := bot.Request(deleteMsg); err != nil {
-					log.Println("❌ Xabarni o‘chirishda xato:", err)
-				}
-
-				callbackResp := tgbotapi.NewCallback(update.CallbackQuery.ID, "Xabar o‘chirildi ✅")
-				if _, err := bot.Request(callbackResp); err != nil {
-					log.Println("❌ Callback error:", err)
-				}
-				continue
-			}
-
 			handleCallbackQuery(update.CallbackQuery)
-
 		} else if update.MyChatMember != nil {
 			handleChatMemberUpdate(update.MyChatMember)
 		}
 	}
-
 }
 
 // Bot guruhga qo'shilganda yoki chiqarilganda
@@ -484,7 +575,6 @@ func handleChatMemberUpdate(chatMember *tgbotapi.ChatMemberUpdated) {
 // Xabarlarni boshqarish
 func handleMessage(message *tgbotapi.Message) {
 	userID := message.From.ID
-	username := message.From.UserName
 
 	// Guruh xabarlarini tekshirish
 	if message.Chat.Type == "group" || message.Chat.Type == "supergroup" {
@@ -499,12 +589,32 @@ func handleMessage(message *tgbotapi.Message) {
 		case "start":
 			handleStart(userID, message.From.FirstName)
 		case "groups":
-			if isAdminMessage(username, 0) {
+			if isAdminMessage(message.From.UserName, 0) {
 				showGroupsList(userID)
 			}
 		case "stats":
-			if isAdminMessage(username, 0) {
+			if isAdminMessage(message.From.UserName, 0) {
 				showStats(userID)
+			}
+		case "test":
+			// Test komandasi - adminlarga test xabari yuborish
+			if isAdminMessage(message.From.UserName, 0) {
+				testMessage := &PendingMessage{
+					MessageID:          999999,
+					GroupID:            message.Chat.ID,
+					GroupTitle:         "Test Group",
+					UserID:             userID,
+					Username:           message.From.UserName,
+					Text:               "Bu test xabari",
+					Timestamp:          time.Now(),
+					LastReminder:       time.Time{},
+					ReminderCount:      0,
+					Status:             "pending",
+					ReminderMessageIDs: make(map[int64]int),
+				}
+				sendAdminReminder(testMessage)
+				msg := tgbotapi.NewMessage(userID, "✅ Test eslatma yuborildi!")
+				bot.Send(msg)
 			}
 		}
 		return
@@ -538,7 +648,7 @@ func handleMessage(message *tgbotapi.Message) {
 		askForPhone(userID)
 	case 6:
 		session.Phone = message.Text
-		session.Username = username
+		session.Username = message.From.UserName
 		submitApplication(session)
 		confirmApplication(userID, session)
 		delete(sessions, userID)
@@ -551,36 +661,70 @@ func handleGroupMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	if message.Chat.ID == -1002816907697 {
+	groupID := message.Chat.ID
+
+	// Admin guruhidan xabar olmaydi
+	if groupID == ADMIN_CHAT_ID {
+		log.Printf("🚫 Admin guruhidan xabar e'tiborga olinmadi: %s", message.Chat.Title)
 		return
 	}
 
-	groupID := message.Chat.ID
-	userID := message.From.ID
 	username := message.From.UserName
+
+	log.Printf("📨 Guruh xabari: %s (@%s) dan %s guruhida (Admin: %v)",
+		message.From.FirstName, username, message.Chat.Title, isAdminMessage(username, groupID))
 
 	// Admin javobini tekshirish
 	if isAdminMessage(username, groupID) {
 		if message.ReplyToMessage != nil {
-			originalMessageID := message.ReplyToMessage.MessageID
-			pendingMessagesMutex.Lock()
-			defer pendingMessagesMutex.Unlock()
-			for i, msg := range pendingMessages {
-				if msg.MessageID == originalMessageID && msg.GroupID == groupID {
-					msg.Status = "answered"
-					msg.AnsweredBy = userID
-					msg.AnsweredAt = time.Now()
-					pendingMessages = append(pendingMessages[:i], pendingMessages[i+1:]...)
-					log.Printf("✅ Admin javob berdi: %d xabarga guruh %d da", originalMessageID, groupID)
-					savePendingMessages()
-					break
+			// Bot tomonidan yuborilgan xabarga javob berilganligini tekshirish
+			if message.ReplyToMessage.From.ID == bot.Self.ID {
+				// Bot xabarining ID si orqali pending message topish
+				replyToMessageID := message.ReplyToMessage.MessageID
+
+				for _, pendingMsg := range pendingMessages {
+					// Agar bot yuborgan xabar ID si mavjud bo'lsa
+					for chatID, messageID := range pendingMsg.ReminderMessageIDs {
+						if chatID == groupID && messageID == replyToMessageID {
+							pendingMsg.Status = "answered"
+							pendingMsg.AnsweredBy = message.From.ID
+							pendingMsg.AnsweredAt = time.Now()
+
+							log.Printf("✅ Admin bot xabariga javob berdi: Pending MSG %d", pendingMsg.MessageID)
+
+							// Barcha eslatma xabarlarini o'chirish
+							deleteReminderMessages(pendingMsg)
+
+							savePendingMessages()
+							return
+						}
+					}
 				}
+			}
+
+			// Eski usul - oddiy reply
+			originalMessageID := message.ReplyToMessage.MessageID
+			if pendingMsg, exists := pendingMessages[originalMessageID]; exists {
+				pendingMsg.Status = "answered"
+				pendingMsg.AnsweredBy = message.From.ID
+				pendingMsg.AnsweredAt = time.Now()
+
+				log.Printf("✅ Admin javob berdi: %d xabarga guruh %d da", originalMessageID, groupID)
+
+				// Eslatma xabarlarini o'chirish
+				deleteReminderMessages(pendingMsg)
+
+				savePendingMessages()
 			}
 		}
 		return
 	}
 
 	// Oddiy userlarning xabarlarini kuzatish
+	if username == "" {
+		username = message.From.FirstName
+	}
+
 	groupInfo := monitoredGroups[groupID]
 	groupTitle := "Noma'lum guruh"
 	if groupInfo != nil {
@@ -588,31 +732,31 @@ func handleGroupMessage(message *tgbotapi.Message) {
 	}
 
 	pendingMsg := &PendingMessage{
-		MessageID:     message.MessageID,
-		GroupID:       groupID,
-		GroupTitle:    groupTitle,
-		UserID:        userID,
-		Username:      username,
-		Text:          message.Text,
-		Timestamp:     time.Now(),
-		LastReminder:  time.Time{},
-		ReminderCount: 0,
-		Status:        "pending",
+		MessageID:          message.MessageID,
+		GroupID:            groupID,
+		GroupTitle:         groupTitle,
+		UserID:             message.From.ID,
+		Username:           username,
+		Text:               message.Text,
+		Timestamp:          time.Now(),
+		LastReminder:       time.Time{},
+		ReminderCount:      0,
+		Status:             "pending",
+		ReminderMessageIDs: make(map[int64]int),
 	}
 
-	pendingMessagesMutex.Lock()
-	pendingMessages = append(pendingMessages, pendingMsg)
-	pendingMessagesMutex.Unlock()
+	pendingMessages[message.MessageID] = pendingMsg
+	savePendingMessages()
 
-	log.Printf("🔔 Yangi user xabari: %s dan %s guruhida", username, groupTitle)
+	log.Printf("🔔 Yangi user xabari saqlandi: MSG %d, %s dan %s guruhida", message.MessageID, username, groupTitle)
 }
 
 // Callback query boshqarish
-func handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
-	userID := callbackQuery.From.ID
-	data := callbackQuery.Data
+func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
+	userID := callback.From.ID
+	data := callback.Data
 
-	bot.Send(tgbotapi.NewCallback(callbackQuery.ID, ""))
+	bot.Send(tgbotapi.NewCallback(callback.ID, ""))
 
 	switch {
 	case data == "visa_service":
@@ -632,7 +776,7 @@ func handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
 	case data == "premium_visas":
 		showPremiumVisas(userID)
 	case data == "back_main":
-		handleStart(userID, callbackQuery.From.FirstName)
+		handleStart(userID, callback.From.FirstName)
 	case data == "back_prices":
 		showPricesMenu(userID)
 	case data == "back_countries":
@@ -642,7 +786,7 @@ func handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
 		showCountryDetails(userID, country)
 	case strings.HasPrefix(data, "apply_"):
 		country := strings.TrimPrefix(data, "apply_")
-		startApplication(userID, country, callbackQuery.From.UserName)
+		startApplication(userID, country, callback.From.UserName)
 	case data == "enter_name":
 		askForName(userID)
 	case data == "enter_travel":
@@ -663,21 +807,21 @@ func handleCallbackQuery(callbackQuery *tgbotapi.CallbackQuery) {
 		msgIDStr := strings.TrimPrefix(data, "mark_answered_")
 		msgID, err := strconv.Atoi(msgIDStr)
 		if err == nil {
-			pendingMessagesMutex.Lock()
-			defer pendingMessagesMutex.Unlock()
-			for i, msg := range pendingMessages {
-				if msg.MessageID == msgID {
-					msg.Status = "answered"
-					msg.AnsweredBy = userID
-					msg.AnsweredAt = time.Now()
-					pendingMessages = append(pendingMessages[:i], pendingMessages[i+1:]...)
-					log.Printf("✅ Admin tomonidan javob berildi deb belgilandi: %d xabar", msgID)
-					savePendingMessages()
-					break
-				}
+			if pendingMsg, exists := pendingMessages[msgID]; exists {
+				pendingMsg.Status = "answered"
+				pendingMsg.AnsweredBy = userID
+				pendingMsg.AnsweredAt = time.Now()
+
+				log.Printf("✅ Admin tomonidan javob berildi deb belgilandi: %d xabar", msgID)
+
+				// Barcha adminlardan eslatma xabarlarini o'chirish
+				deleteReminderMessages(pendingMsg)
+
+				// Callback javobini yuborish
+				bot.Send(tgbotapi.NewCallbackWithAlert(callback.ID, "✅ Xabar javob berildi deb belgilandi va barcha adminlardan o'chirildi!"))
+
+				savePendingMessages()
 			}
-			// Callback javobini yuborish
-			bot.Send(tgbotapi.NewCallbackWithAlert(callbackQuery.ID, "✅ Xabar javob berildi deb belgilandi!"))
 		}
 	}
 }
@@ -1095,7 +1239,7 @@ Oila ahvolingiz haqida ma'lumot bering:
 Masalan:
 • Oilaliman, 1 ta farzandim bor
 • Yolg'izman
-• Ota-onam bilan yashayman
+• Ota-onam bilan yashayман
 • Turmush qurmaganman`
 
 	session := sessions[userID]
@@ -1314,9 +1458,6 @@ func showStats(userID int64) {
 	totalPending := 0
 	totalAnswered := 0
 
-	pendingMessagesMutex.Lock()
-	defer pendingMessagesMutex.Unlock()
-
 	for _, msg := range pendingMessages {
 		if msg.Status == "pending" {
 			totalPending++
@@ -1336,80 +1477,32 @@ func showStats(userID int64) {
 		len(monitoredGroups),
 		totalPending,
 		totalAnswered,
-		len(pendingMessages),
-		len(ADMIN_USERNAMES))
+		len(pendingMessages))
 
 	msg := tgbotapi.NewMessage(userID, text)
 	bot.Send(msg)
 }
 
-func loadChatConfigs() {
-	data, err := ioutil.ReadFile(CHAT_CONFIG_FILE)
-	if err != nil {
-		log.Printf("❌ Chat config faylini o'qishda xato: %v", err)
+// Barcha adminlardan eslatma xabarlarini o'chirish - TO'G'RILANGAN VERSIYA
+func deleteReminderMessages(pendingMsg *PendingMessage) {
+	if pendingMsg.ReminderMessageIDs == nil {
 		return
 	}
 
-	err = json.Unmarshal(data, &chatConfigs)
-	if err != nil {
-		log.Printf("❌ Chat config JSON parse qilishda xato: %v", err)
-		return
-	}
-
-	log.Printf("✅ %d ta chat config yuklandi", len(chatConfigs))
-}
-
-func findMatchingChatConfig(groupTitle, messageText string) *ChatConfig {
-	// First try to match with group title
-	for _, config := range chatConfigs {
-		if strings.Contains(strings.ToLower(groupTitle), strings.ToLower(config.Text)) {
-			return &config
+	deletedCount := 0
+	for chatID, messageID := range pendingMsg.ReminderMessageIDs {
+		deleteMsg := tgbotapi.NewDeleteMessage(chatID, messageID)
+		_, err := bot.Request(deleteMsg)
+		if err != nil {
+			log.Printf("❌ Chat %d dan xabar %d ni o'chirishda xato: %v", chatID, messageID, err)
+		} else {
+			deletedCount++
+			log.Printf("🗑️ Chat %d dan eslatma xabari o'chirildi (MSG ID: %d)", chatID, messageID)
 		}
 	}
 
-	// Then try to match with message content
-	for _, config := range chatConfigs {
-		if strings.Contains(strings.ToLower(messageText), strings.ToLower(config.Text)) {
-			return &config
-		}
-	}
+	log.Printf("🗑️ Jami %d ta eslatma xabari o'chirildi", deletedCount)
 
-	return nil
-}
-
-func sendMessageWithThread(chatID int64, threadID int, text string, keyboard *tgbotapi.InlineKeyboardMarkup) error {
-	// Prepare the request payload
-	payload := map[string]interface{}{
-		"chat_id": chatID,
-		"text":    text,
-	}
-
-	if threadID != 0 {
-		payload["message_thread_id"] = threadID
-	}
-
-	if keyboard != nil {
-		payload["reply_markup"] = keyboard
-	}
-
-	// Convert payload to JSON
-	jsonData, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("JSON marshal error: %v", err)
-	}
-
-	// Send HTTP request to Telegram API
-	url := fmt.Sprintf("https://api.telegram.org/bot%s/sendMessage", bot.Token)
-	resp, err := http.Post(url, "application/json", bytes.NewBuffer(jsonData))
-	if err != nil {
-		return fmt.Errorf("HTTP request error: %v", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		body, _ := ioutil.ReadAll(resp.Body)
-		return fmt.Errorf("API error: %s", string(body))
-	}
-
-	return nil
+	// ReminderMessageIDs ni tozalash
+	pendingMsg.ReminderMessageIDs = make(map[int64]int)
 }

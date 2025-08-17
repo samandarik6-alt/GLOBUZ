@@ -1,7 +1,7 @@
 package main
 
 // VisaData - Barcha davlatlar uchun visa ma'lumotlari
-var VisaData = map[string]VisaInfo{
+var visaData = map[string]VisaInfo{
 	"Schengen": {
 		Flag:           "🇪🇺",
 		ServicePrice:   "300$",

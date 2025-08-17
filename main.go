@@ -989,7 +989,7 @@ Quyidagi davlatlar uchun visa xizmatini taklif etamiz:`
 	for _, row := range countries {
 		var buttons []tgbotapi.InlineKeyboardButton
 		for _, country := range row {
-			if visa, exists := VisaData[country]; exists {
+			if visa, exists := visaData[country]; exists {
 				buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
 					visa.Flag+" "+country, "country_"+country))
 			}
@@ -1086,7 +1086,7 @@ func showPremiumVisas(userID int64) {
 
 // Davlat tafsilotlari
 func showCountryDetails(userID int64, country string) {
-	visa, exists := VisaData[country]
+	visa, exists := visaData[country]
 	if !exists {
 		return
 	}
@@ -1127,7 +1127,7 @@ Ariza berishni xohlaysizmi?`,
 
 // Ariza berish boshlash
 func startApplication(userID int64, country, username string) {
-	visa := VisaData[country]
+	visa := visaData[country]
 
 	text := fmt.Sprintf(`🏢 %s VIZASI UCHUN ARIZA
 
@@ -1268,7 +1268,7 @@ Telefon raqamingizni yozing (masalan: +998901234567):`, sessions[userID].Name)
 
 // Arizani yuborish
 func submitApplication(session *UserSession) {
-	visa := VisaData[session.SelectedVisa]
+	visa := visaData[session.SelectedVisa]
 	currentTime := time.Now().Format("02.01.2006 15:04")
 
 	username := session.Username
@@ -1276,13 +1276,7 @@ func submitApplication(session *UserSession) {
 		username = "mavjud emas"
 	}
 
-	// Barcha faol guruhlarga yuborish
-	for _, group := range monitoredGroups {
-		if !group.IsActive {
-			continue
-		}
-
-		groupMessage := fmt.Sprintf(`🆕 YANGI ARIZA - %s
+	groupMessage := fmt.Sprintf(`🆕 YANGI ARIZA - %s
 
 👤 MIJOZ MA'LUMOTLARI:
 🪪 F.I.O: %s
@@ -1316,37 +1310,37 @@ func submitApplication(session *UserSession) {
 ━━━━━━━━━━━━━━━━━━━━━━
 
 🔥 OPERATOR! 30 DAQIQA ICHIDA MIJOZ BILAN BOG'LANING!`,
-			session.SelectedVisa,
-			session.Name,
-			session.Phone,
-			username,
-			session.UserID,
-			session.SelectedVisa,
-			visa.Flag,
-			visa.VisaType,
-			visa.ServicePrice,
-			visa.VisaFee,
-			visa.ProcessingTime,
-			visa.Requirements,
-			session.TravelHistory,
-			session.WorkInfo,
-			session.BankInfo,
-			session.FamilyInfo,
-			currentTime)
+		session.SelectedVisa,
+		session.Name,
+		session.Phone,
+		username,
+		session.UserID,
+		session.SelectedVisa,
+		visa.Flag,
+		visa.VisaType,
+		visa.ServicePrice,
+		visa.VisaFee,
+		visa.ProcessingTime,
+		visa.Requirements,
+		session.TravelHistory,
+		session.WorkInfo,
+		session.BankInfo,
+		session.FamilyInfo,
+		currentTime)
 
-		msg := tgbotapi.NewMessage(group.GroupID, groupMessage)
-		_, err := bot.Send(msg)
-		if err != nil {
-			log.Printf("❌ Guruh %s ga ariza yuborishda xato: %v", group.GroupTitle, err)
-		} else {
-			log.Printf("✅ Guruh %s ga ariza yuborildi: %s", group.GroupTitle, session.Name)
-		}
+	// Faqat admin guruhiga yuborish (ADMIN_CHAT_ID ga)
+	msg := tgbotapi.NewMessage(ADMIN_CHAT_ID, groupMessage)
+	_, err := bot.Send(msg)
+	if err != nil {
+		log.Printf("❌ Admin guruhiga ariza yuborishda xato: %v", err)
+	} else {
+		log.Printf("✅ Admin guruhiga ariza yuborildi: %s", session.Name)
 	}
 }
 
 // Arizani tasdiqlash
 func confirmApplication(userID int64, session *UserSession) {
-	visa := VisaData[session.SelectedVisa]
+	visa := visaData[session.SelectedVisa]
 
 	text := fmt.Sprintf(`✅ ARIZA MUVAFFAQIYATLI YUBORILDI!
 

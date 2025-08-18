@@ -16,51 +16,27 @@ import (
 // Konstantalar
 const (
 	BOT_TOKEN         = "8214075520:AAH2NuC9spv7D8up4dFJnW8PariCeSrf0aM"
-	REMINDER_DELAY    = 5 * time.Second
+	REMINDER_DELAY    = 10 * time.Minute
 	PENDING_JSON_FILE = "pending_messages.json"
 	GROUPS_JSON_FILE  = "groups.json"
-	TOPICS_JSON_FILE  = "topics.json"
 	ADMIN_CHAT_ID     = -1002816907697 // Adminlar guruhi - bu yerdan xabar olmaydi
 )
 
 // Strukturalar
-type VisaInfo struct {
-	Flag           string `json:"flag"`
-	ServicePrice   string `json:"service_price"`
-	VisaType       string `json:"visa_type"`
-	VisaFee        string `json:"visa_fee"`
-	ProcessingTime string `json:"processing_time"`
-	Requirements   string `json:"requirements"`
-	Details        string `json:"details"`
-}
-
-type UserSession struct {
-	Step          int    `json:"step"`
-	SelectedVisa  string `json:"selected_visa"`
-	Name          string `json:"name"`
-	TravelHistory string `json:"travel_history"`
-	WorkInfo      string `json:"work_info"`
-	BankInfo      string `json:"bank_info"`
-	FamilyInfo    string `json:"family_info"`
-	Phone         string `json:"phone"`
-	UserID        int64  `json:"user_id"`
-	Username      string `json:"username"`
-}
-
 type PendingMessage struct {
-	MessageID          int           `json:"message_id"`
-	GroupID            int64         `json:"group_id"`
-	GroupTitle         string        `json:"group_title"`
-	UserID             int64         `json:"user_id"`
-	Username           string        `json:"username"`
-	Text               string        `json:"text"`
-	Timestamp          time.Time     `json:"timestamp"`
-	LastReminder       time.Time     `json:"last_reminder"`
-	ReminderCount      int           `json:"reminder_count"`
-	Status             string        `json:"status"` // "pending", "answered", "ignored"
-	AnsweredBy         int64         `json:"answered_by,omitempty"`
-	AnsweredAt         time.Time     `json:"answered_at,omitempty"`
-	ReminderMessageIDs map[int64]int `json:"reminder_message_ids,omitempty"` // adminID -> messageID
+	MessageID      int       `json:"message_id"`
+	GroupID        int64     `json:"group_id"`
+	GroupTitle     string    `json:"group_title"`
+	UserID         int64     `json:"user_id"`
+	Username       string    `json:"username"`
+	Text           string    `json:"text"`
+	Timestamp      time.Time `json:"timestamp"`
+	LastReminder   time.Time `json:"last_reminder"`
+	ReminderCount  int       `json:"reminder_count"`
+	Status         string    `json:"status"` // "pending", "answered", "ignored"
+	AnsweredBy     int64     `json:"answered_by,omitempty"`
+	AnsweredAt     time.Time `json:"answered_at,omitempty"`
+	SentMessageIDs []int     `json:"sent_message_ids,omitempty"` // Yuborilgan eslatma xabarlar ID lari
 }
 
 type GroupInfo struct {
@@ -88,14 +64,9 @@ type TopicInfo struct {
 	Text            string `json:"text"`
 }
 
-type TopicsData struct {
-	Topics []TopicInfo `json:"topics"`
-}
-
 // Global o'zgaruvchilar
 var (
 	bot             *tgbotapi.BotAPI
-	sessions        = make(map[int64]*UserSession)
 	pendingMessages = make(map[int]*PendingMessage)
 	monitoredGroups = make(map[int64]*GroupInfo)
 	topicsList      = []TopicInfo{}
@@ -425,11 +396,6 @@ Iltimos tezroq javob bering!`,
 		formatDuration(time.Since(pendingMsg.Timestamp)),
 		pendingMsg.ReminderCount)
 
-	// ReminderMessageIDs ni initialize qilish
-	if pendingMsg.ReminderMessageIDs == nil {
-		pendingMsg.ReminderMessageIDs = make(map[int64]int)
-	}
-
 	// Topicga xabar yuborish
 	msg := tgbotapi.NewMessage(targetChatID, reminderText)
 
@@ -446,10 +412,13 @@ Iltimos tezroq javob bering!`,
 		msg = msgWithThread
 	}
 
-	// "Javob berildi" tugmasini qo'shish
+	// "Javob berildi" va "Xabarni ko'rish" tugmalarini qo'shish
 	keyboard := tgbotapi.NewInlineKeyboardMarkup(
 		tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData("✅ Javob berildi", fmt.Sprintf("mark_answered_%d", pendingMsg.MessageID)),
+		),
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonURL("📄 Xabarni ko'rish", fmt.Sprintf("https://t.me/c/%d/%d", -pendingMsg.GroupID-1000000000000, pendingMsg.MessageID)),
 		),
 	)
 	msg.ReplyMarkup = keyboard
@@ -458,8 +427,8 @@ Iltimos tezroq javob bering!`,
 	if err != nil {
 		log.Printf("❌ Topicga eslatma yuborishda xato: %v", err)
 	} else {
-		// Topic message ID ni saqlash
-		pendingMsg.ReminderMessageIDs[targetChatID] = sentMsg.MessageID
+		// Yuborilgan xabar ID sini SentMessageIDs ga qo'shish
+		pendingMsg.SentMessageIDs = append(pendingMsg.SentMessageIDs, sentMsg.MessageID)
 		log.Printf("✅ Topic %d ga eslatma yuborildi (MSG ID: %d)", targetThreadID, sentMsg.MessageID)
 	}
 
@@ -574,8 +543,6 @@ func handleChatMemberUpdate(chatMember *tgbotapi.ChatMemberUpdated) {
 
 // Xabarlarni boshqarish
 func handleMessage(message *tgbotapi.Message) {
-	userID := message.From.ID
-
 	// Guruh xabarlarini tekshirish
 	if message.Chat.Type == "group" || message.Chat.Type == "supergroup" {
 		// Guruh ma'lumotlarini yangilash
@@ -584,75 +551,8 @@ func handleMessage(message *tgbotapi.Message) {
 		return
 	}
 
-	if message.IsCommand() {
-		switch message.Command() {
-		case "start":
-			handleStart(userID, message.From.FirstName)
-		case "groups":
-			if isAdminMessage(message.From.UserName, 0) {
-				showGroupsList(userID)
-			}
-		case "stats":
-			if isAdminMessage(message.From.UserName, 0) {
-				showStats(userID)
-			}
-		case "test":
-			// Test komandasi - adminlarga test xabari yuborish
-			if isAdminMessage(message.From.UserName, 0) {
-				testMessage := &PendingMessage{
-					MessageID:          999999,
-					GroupID:            message.Chat.ID,
-					GroupTitle:         "Test Group",
-					UserID:             userID,
-					Username:           message.From.UserName,
-					Text:               "Bu test xabari",
-					Timestamp:          time.Now(),
-					LastReminder:       time.Time{},
-					ReminderCount:      0,
-					Status:             "pending",
-					ReminderMessageIDs: make(map[int64]int),
-				}
-				sendAdminReminder(testMessage)
-				msg := tgbotapi.NewMessage(userID, "✅ Test eslatma yuborildi!")
-				bot.Send(msg)
-			}
-		}
-		return
-	}
-
-	session, exists := sessions[userID]
-	if !exists {
-		return
-	}
-
-	switch session.Step {
-	case 1:
-		session.Name = message.Text
-		session.Step = 2
-		askForTravelHistory(userID)
-	case 2:
-		session.TravelHistory = message.Text
-		session.Step = 3
-		askForWorkInfo(userID)
-	case 3:
-		session.WorkInfo = message.Text
-		session.Step = 4
-		askForBankInfo(userID)
-	case 4:
-		session.BankInfo = message.Text
-		session.Step = 5
-		askForFamilyInfo(userID)
-	case 5:
-		session.FamilyInfo = message.Text
-		session.Step = 6
-		askForPhone(userID)
-	case 6:
-		session.Phone = message.Text
-		session.Username = message.From.UserName
-		submitApplication(session)
-		confirmApplication(userID, session)
-		delete(sessions, userID)
-	}
+	// Private xabarlarni ignore qilish
+	log.Printf("📝 Private xabar e'tiborga olinmadi: %s dan", message.From.FirstName)
 }
 
 // Guruh xabarlarini boshqarish
@@ -684,16 +584,16 @@ func handleGroupMessage(message *tgbotapi.Message) {
 
 				for _, pendingMsg := range pendingMessages {
 					// Agar bot yuborgan xabar ID si mavjud bo'lsa
-					for chatID, messageID := range pendingMsg.ReminderMessageIDs {
-						if chatID == groupID && messageID == replyToMessageID {
+					for _, sentMsgID := range pendingMsg.SentMessageIDs {
+						if sentMsgID == replyToMessageID {
 							pendingMsg.Status = "answered"
 							pendingMsg.AnsweredBy = message.From.ID
 							pendingMsg.AnsweredAt = time.Now()
 
 							log.Printf("✅ Admin bot xabariga javob berdi: Pending MSG %d", pendingMsg.MessageID)
 
-							// Barcha eslatma xabarlarini o'chirish
-							deleteReminderMessages(pendingMsg)
+							// Barcha yuborilgan eslatma xabarlarini o'chirish
+							deleteSentMessages(pendingMsg)
 
 							savePendingMessages()
 							return
@@ -711,8 +611,8 @@ func handleGroupMessage(message *tgbotapi.Message) {
 
 				log.Printf("✅ Admin javob berdi: %d xabarga guruh %d da", originalMessageID, groupID)
 
-				// Eslatma xabarlarini o'chirish
-				deleteReminderMessages(pendingMsg)
+				// Barcha eslatma xabarlarini o'chirish
+				deleteSentMessages(pendingMsg)
 
 				savePendingMessages()
 			}
@@ -732,17 +632,17 @@ func handleGroupMessage(message *tgbotapi.Message) {
 	}
 
 	pendingMsg := &PendingMessage{
-		MessageID:          message.MessageID,
-		GroupID:            groupID,
-		GroupTitle:         groupTitle,
-		UserID:             message.From.ID,
-		Username:           username,
-		Text:               message.Text,
-		Timestamp:          time.Now(),
-		LastReminder:       time.Time{},
-		ReminderCount:      0,
-		Status:             "pending",
-		ReminderMessageIDs: make(map[int64]int),
+		MessageID:      message.MessageID,
+		GroupID:        groupID,
+		GroupTitle:     groupTitle,
+		UserID:         message.From.ID,
+		Username:       username,
+		Text:           message.Text,
+		Timestamp:      time.Now(),
+		LastReminder:   time.Time{},
+		ReminderCount:  0,
+		Status:         "pending",
+		SentMessageIDs: []int{}, // Yuborilgan eslatma xabar ID lari uchun slice
 	}
 
 	pendingMessages[message.MessageID] = pendingMsg
@@ -758,52 +658,8 @@ func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
 
 	bot.Send(tgbotapi.NewCallback(callback.ID, ""))
 
-	switch {
-	case data == "visa_service":
-		showCountrySelection(userID)
-	case data == "prices":
-		showPricesMenu(userID)
-	case data == "countries_list":
-		showAllCountries(userID)
-	case data == "contact":
-		showContact(userID)
-	case data == "top_visas":
-		showTopVisas(userID)
-	case data == "all_countries":
-		showAllCountries(userID)
-	case data == "cheap_visas":
-		showCheapVisas(userID)
-	case data == "premium_visas":
-		showPremiumVisas(userID)
-	case data == "back_main":
-		handleStart(userID, callback.From.FirstName)
-	case data == "back_prices":
-		showPricesMenu(userID)
-	case data == "back_countries":
-		showCountrySelection(userID)
-	case strings.HasPrefix(data, "country_"):
-		country := strings.TrimPrefix(data, "country_")
-		showCountryDetails(userID, country)
-	case strings.HasPrefix(data, "apply_"):
-		country := strings.TrimPrefix(data, "apply_")
-		startApplication(userID, country, callback.From.UserName)
-	case data == "enter_name":
-		askForName(userID)
-	case data == "enter_travel":
-		askForTravelHistory(userID)
-	case data == "enter_work":
-		askForWorkInfo(userID)
-	case data == "enter_bank":
-		askForBankInfo(userID)
-	case data == "enter_family":
-		askForFamilyInfo(userID)
-	case data == "enter_phone":
-		askForPhone(userID)
-	case data == "new_application":
-		showCountrySelection(userID)
-	case data == "operator":
-		showContact(userID)
-	case strings.HasPrefix(data, "mark_answered_"):
+	// Faqat "mark_answered" va "show_message" callback larni boshqarish
+	if strings.HasPrefix(data, "mark_answered_") {
 		msgIDStr := strings.TrimPrefix(data, "mark_answered_")
 		msgID, err := strconv.Atoi(msgIDStr)
 		if err == nil {
@@ -814,8 +670,8 @@ func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
 
 				log.Printf("✅ Admin tomonidan javob berildi deb belgilandi: %d xabar", msgID)
 
-				// Barcha adminlardan eslatma xabarlarini o'chirish
-				deleteReminderMessages(pendingMsg)
+				// Barcha yuborilgan eslatma xabarlarini o'chirish
+				deleteSentMessages(pendingMsg)
 
 				// Callback javobini yuborish
 				bot.Send(tgbotapi.NewCallbackWithAlert(callback.ID, "✅ Xabar javob berildi deb belgilandi va barcha adminlardan o'chirildi!"))
@@ -823,680 +679,60 @@ func handleCallbackQuery(callback *tgbotapi.CallbackQuery) {
 				savePendingMessages()
 			}
 		}
-	}
-}
+	} else if strings.HasPrefix(data, "show_message_") {
+		// show_message_GROUPID_MESSAGEID formatini parse qilish
+		parts := strings.Split(data, "_")
+		if len(parts) == 4 {
+			groupIDStr := parts[2]
+			msgIDStr := parts[3]
 
-// Start komandasi
-func handleStart(userID int64, firstName string) {
-	text := fmt.Sprintf(`Assalomu alaykum %s! 👋
+			groupID, err1 := strconv.ParseInt(groupIDStr, 10, 64)
+			msgID, err2 := strconv.Atoi(msgIDStr)
 
-🏢 GLOBUZ VISA AGENTLIGI
-Men sizning shaxsiy visa yordamchingizman.
+			if err1 == nil && err2 == nil {
+				// Message linkini yaratish
+				messageLink := fmt.Sprintf("https://t.me/c/%d/%d", -groupID-1000000000000, msgID)
 
-5 yildan ortiq tajriba bilan 50+ davlatga visa olishda yordam beramiz!
+				if pendingMsg, exists := pendingMessages[msgID]; exists {
+					// Faqat xabar matni va link tugmasi
+					keyboard := tgbotapi.NewInlineKeyboardMarkup(
+						tgbotapi.NewInlineKeyboardRow(
+							tgbotapi.NewInlineKeyboardButtonURL("Xabarni ochish", messageLink),
+						),
+					)
 
-Sizga qanday yordam bera olishim mumkin?`, firstName)
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🏢 Viza xizmati kerak", "visa_service"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Narxlarni ko'rish", "prices"),
-			tgbotapi.NewInlineKeyboardButtonData("📋 Davlatlar ro'yxati", "countries_list"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📞 Bog'lanish", "contact"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Narxlar menyusi
-func showPricesMenu(userID int64) {
-	text := `💰 VISA NARXLARI BO'LIMI
-
-Qaysi kategoriyani ko'rishni xohlaysiz?`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔝 TOP vizalar", "top_visas"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🌍 Barcha davlatlar", "all_countries"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Arzon vizalar", "cheap_visas"),
-			tgbotapi.NewInlineKeyboardButtonData("🏆 Premium vizalar", "premium_visas"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Asosiy menyu", "back_main"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// TOP vizalar
-func showTopVisas(userID int64) {
-	text := `🔝 TOP VIZALAR
-
-🇺🇸 USA
-💼 Xizmat: 300$
-📋 Visa to'lovi: 185 USD
-⏰ Muddati: Turlicha
-
-🇪🇺 Schengen
-💼 Xizmat: 300$
-📋 Visa to'lovi: 90 euro + appointment to'lovi
-⏰ Muddati: 15-45 kun
-
-🇬🇧 UK
-💼 Xizmat: 500$
-📋 Visa to'lovi: 280 USD + 179 USD + 77 GBP
-⏰ Muddati: Turlicha`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📞 Konsultatsiya olish", "contact"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🏢 Ariza berish", "visa_service"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Narxlar menyusi", "back_prices"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Davlat tanlash
-func showCountrySelection(userID int64) {
-	text := `🏢 VIZA XIZMATI
-
-Qaysi davlat vizasini olmoqchisiz?
-
-🔥 Mashhur yo'nalishlar:
-• 🇺🇸 Amerika - 300$ (1 yillik)
-• 🇪🇺 Schengen - 300$ (Evropa)
-• 🇬🇧 UK - 500$ (Britaniya)
-
-Yoki avval narxlarni ko'ring 👇`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇺🇸 Amerika", "country_USA"),
-			tgbotapi.NewInlineKeyboardButtonData("🇪🇺 Schengen", "country_Schengen"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇬🇧 UK", "country_UK"),
-			tgbotapi.NewInlineKeyboardButtonData("🇨🇦 Kanada", "country_Canada"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇦🇺 Avstraliya", "country_Australia"),
-			tgbotapi.NewInlineKeyboardButtonData("🇯🇵 Yaponiya", "country_Japan"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇧🇷 Braziliya", "country_Brazil"),
-			tgbotapi.NewInlineKeyboardButtonData("🇸🇦 Saudiya", "country_Saudi Arabia"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Narxlarni ko'rish", "prices"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📋 Boshqa davlatlar", "all_countries"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Asosiy menyu", "back_main"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Barcha davlatlar
-func showAllCountries(userID int64) {
-	text := `🌍 BARCHA DAVLATLAR
-
-Quyidagi davlatlar uchun visa xizmatini taklif etamiz:`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup()
-
-	countries := [][]string{
-		{"USA", "Schengen", "UK"},
-		{"Canada", "Australia", "New Zealand"},
-		{"Japan", "Brazil", "Saudi Arabia"},
-		{"India", "South Africa", "Seychelles"},
-		{"Uganda", "Kuwait", "Bahrain"},
-		{"Israel", "Pakistan", "Vietnam"},
-		{"Albania", "Taiwan", "Turkey"},
-		{"UAE", "Qatar", "Oman"},
-		{"Jordan", "Egypt", "Morocco"},
-		{"Tunisia", "Kenya", "Tanzania"},
-		{"Ethiopia"},
-	}
-
-	for _, row := range countries {
-		var buttons []tgbotapi.InlineKeyboardButton
-		for _, country := range row {
-			if visa, exists := visaData[country]; exists {
-				buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(
-					visa.Flag+" "+country, "country_"+country))
+					msg := tgbotapi.NewMessage(callback.Message.Chat.ID, pendingMsg.Text)
+					msg.ReplyMarkup = keyboard
+					bot.Send(msg)
+					bot.Send(tgbotapi.NewCallback(callback.ID, ""))
+				} else {
+					bot.Send(tgbotapi.NewCallback(callback.ID, "Xabar topilmadi"))
+				}
 			}
 		}
-		if len(buttons) > 0 {
-			keyboard.InlineKeyboard = append(keyboard.InlineKeyboard, buttons)
-		}
-	}
-
-	keyboard.InlineKeyboard = append(keyboard.InlineKeyboard,
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Orqaga", "back_countries"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Arzon vizalar
-func showCheapVisas(userID int64) {
-	text := `💰 ARZON VIZALAR
-
-🇸🇦 Saudi Arabia - BEPUL xizmat
-🇮🇳 India - 100$ xizmat
-🇵🇰 Pakistan - 100$ xizmat (visa bepul)
-🇻🇳 Vietnam - 100$ xizmat
-🇸🇨 Seychelles - 100$ xizmat
-🇰🇼 Kuwait - 100$ xizmat
-🇧🇭 Bahrain - 100$ xizmat
-🇹🇷 Turkey - 100$ xizmat`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇸🇦 Saudi Arabia", "country_Saudi Arabia"),
-			tgbotapi.NewInlineKeyboardButtonData("🇮🇳 India", "country_India"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇵🇰 Pakistan", "country_Pakistan"),
-			tgbotapi.NewInlineKeyboardButtonData("🇻🇳 Vietnam", "country_Vietnam"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇸🇨 Seychelles", "country_Seychelles"),
-			tgbotapi.NewInlineKeyboardButtonData("🇰🇼 Kuwait", "country_Kuwait"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇧🇭 Bahrain", "country_Bahrain"),
-			tgbotapi.NewInlineKeyboardButtonData("🇹🇷 Turkey", "country_Turkey"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Narxlar menyusi", "back_prices"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Premium vizalar
-func showPremiumVisas(userID int64) {
-	text := `🏆 PREMIUM VIZALAR
-
-🇨🇦 Canada - 700$ xizmat
-🇦🇺 Australia - 700$ xizmat
-🇳🇿 New Zealand - 700$ xizmat
-🇬🇧 UK - 500$ xizmat
-🇿🇦 South Africa - 500$ xizmat
-🇮🇱 Israel - 500$ xizmat`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇨🇦 Canada", "country_Canada"),
-			tgbotapi.NewInlineKeyboardButtonData("🇦🇺 Australia", "country_Australia"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇳🇿 New Zealand", "country_New Zealand"),
-			tgbotapi.NewInlineKeyboardButtonData("🇬🇧 UK", "country_UK"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🇿🇦 South Africa", "country_South Africa"),
-			tgbotapi.NewInlineKeyboardButtonData("🇮🇱 Israel", "country_Israel"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Narxlar menyusi", "back_prices"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Davlat tafsilotlari
-func showCountryDetails(userID int64, country string) {
-	visa, exists := visaData[country]
-	if !exists {
-		return
-	}
-
-	text := fmt.Sprintf(`%s %s VIZASI
-
-💼 Bizning xizmat: %s
-📋 Visa to'lovi: %s
-⏰ Jarayon vaqti: %s
-
-🎯 Visa turi: %s
-
-📄 Talablar: %s
-
-ℹ️ Qo'shimcha: %s
-
-Ariza berishni xohlaysizmi?`,
-		visa.Flag, country, visa.ServicePrice, visa.VisaFee,
-		visa.ProcessingTime, visa.VisaType, visa.Requirements, visa.Details)
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("✅ Ariza berish", "apply_"+country),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Boshqa narxlar", "prices"),
-			tgbotapi.NewInlineKeyboardButtonData("📞 Konsultatsiya", "contact"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Davlat tanlash", "back_countries"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Ariza berish boshlash
-func startApplication(userID int64, country, username string) {
-	visa := visaData[country]
-
-	text := fmt.Sprintf(`🏢 %s VIZASI UCHUN ARIZA
-
-%s Tanlangan davlat: %s
-💼 Xizmat narxi: %s
-
-Ariza berish uchun bir necha savolga javob bering.
-
-❓ 1-savol: Ismingizni bilsam bo'ladimi?`,
-		country, visa.Flag, country, visa.ServicePrice)
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("📝 Ha, ismimni yozaman", "enter_name"),
-		),
-	)
-
-	sessions[userID] = &UserSession{
-		Step:         0,
-		SelectedVisa: country,
-		UserID:       userID,
-		Username:     username,
-	}
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Ism so'rash
-func askForName(userID int64) {
-	text := `🪪 Iltimos, to'liq ismingizni yozing:
-
-(Masalan: Aliyev Vali Akramovich)`
-
-	sessions[userID].Step = 1
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Sayohat tarixi so'rash
-func askForTravelHistory(userID int64) {
-	session, exists := sessions[userID]
-	if !exists {
-		return
-	}
-
-	text := fmt.Sprintf(`Rahmat %s! 👋
-
-🌍 SAYOHAT TARIXI
-
-Avval qaysi davlatlarga borganmisiz?
-
-Masalan:
-• Turkiya - 2022 yilda 7 kun
-• Dubay - 2023 yilda 5 kun
-• Agar hech qayerga bormagan bo'lsangiz "Hech qayerga bormaganman" deb yozing`, session.Name)
-
-	session.Step = 2
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Ish joyi ma'lumoti so'rash
-func askForWorkInfo(userID int64) {
-	text := `💼 ISH JOYI MA'LUMOTI
-
-Hozirgi ish joyingiz haqida ma'lumot bering:
-
-Masalan:
-• Kompaniya nomi: "IT Solutions"
-• Lavozim: Dasturchi
-• Maosh: 8 million som
-• Agar ishlamasangiz "Ishlamayman" deb yozing`
-
-	session := sessions[userID]
-	session.Step = 3
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Bank ma'lumoti so'rash
-func askForBankInfo(userID int64) {
-	text := `💰 MOLIYAVIY HOLAT
-
-Bank hisobingiz va daromadingiz haqida ma'lumot bering:
-
-Masalan:
-• Bank hisobida: 25 million som
-• Qo'shimcha daromad: Freelance ish
-• Agar kam bo'lsa ham haqiqiy summani yozing`
-
-	session := sessions[userID]
-	session.Step = 4
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Oila ma'lumoti so'rash
-func askForFamilyInfo(userID int64) {
-	text := `🏠 OILA AHVOLI
-
-Oila ahvolingiz haqida ma'lumot bering:
-
-Masalan:
-• Oilaliman, 1 ta farzandim bor
-• Yolg'izman
-• Ota-onam bilan yashayман
-• Turmush qurmaganman`
-
-	session := sessions[userID]
-	session.Step = 5
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Telefon raqam so'rash
-func askForPhone(userID int64) {
-	text := fmt.Sprintf(`Juda yaxshi %s! ✅
-
-📞 Menejerlarimiz siz bilan bog'lanishi uchun telefon raqamingizni qoldirishingizni so'raymiz.
-
-30 daqiqa ichida mutaxassis siz bilan bog'lanadi!
-
-Telefon raqamingizni yozing (masalan: +998901234567):`, sessions[userID].Name)
-
-	session := sessions[userID]
-	session.Step = 6
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Arizani yuborish
-func submitApplication(session *UserSession) {
-	visa := visaData[session.SelectedVisa]
-	currentTime := time.Now().Format("02.01.2006 15:04")
-
-	username := session.Username
-	if username == "" {
-		username = "mavjud emas"
-	}
-
-	groupMessage := fmt.Sprintf(`🆕 YANGI ARIZA - %s
-
-👤 MIJOZ MA'LUMOTLARI:
-🪪 F.I.O: %s
-📞 Telefon: %s
-📱 Telegram: @%s
-🆔 User ID: %d
-
-🌍 VISA MA'LUMOTLARI:
-📍 Davlat: %s %s
-🎯 Visa turi: %s
-💼 Xizmat narxi: %s
-💳 Visa to'lovi: %s
-⏰ Jarayon vaqti: %s
-📋 Talablar: %s
-
-📝 BATAFSIL MA'LUMOT:
-
-🌍 SAYOHAT TARIXI:
-%s
-
-💼 ISH JOYI:
-%s
-
-💰 MOLIYAVIY HOLAT:
-%s
-
-🏠 OILA AHVOLI:
-%s
-
-⏰ ARIZA VAQTI: %s
-━━━━━━━━━━━━━━━━━━━━━━
-
-🔥 OPERATOR! 30 DAQIQA ICHIDA MIJOZ BILAN BOG'LANING!`,
-		session.SelectedVisa,
-		session.Name,
-		session.Phone,
-		username,
-		session.UserID,
-		session.SelectedVisa,
-		visa.Flag,
-		visa.VisaType,
-		visa.ServicePrice,
-		visa.VisaFee,
-		visa.ProcessingTime,
-		visa.Requirements,
-		session.TravelHistory,
-		session.WorkInfo,
-		session.BankInfo,
-		session.FamilyInfo,
-		currentTime)
-
-	// Faqat admin guruhiga yuborish (ADMIN_CHAT_ID ga)
-	msg := tgbotapi.NewMessage(ADMIN_CHAT_ID, groupMessage)
-	_, err := bot.Send(msg)
-	if err != nil {
-		log.Printf("❌ Admin guruhiga ariza yuborishda xato: %v", err)
-	} else {
-		log.Printf("✅ Admin guruhiga ariza yuborildi: %s", session.Name)
 	}
 }
 
-// Arizani tasdiqlash
-func confirmApplication(userID int64, session *UserSession) {
-	visa := visaData[session.SelectedVisa]
-
-	text := fmt.Sprintf(`✅ ARIZA MUVAFFAQIYATLI YUBORILDI!
-
-Hurmatli %s, sizning %s vizasi uchun arizangiz qabul qilindi!
-
-📋 TANLANGAN XIZMAT:
-%s %s
-💼 Xizmat: %s
-💳 Visa to'lovi: %s
-⏰ Jarayon: %s
-
-🔥 30 DAQIQA ICHIDA MENEJERIMIZ SIZ BILAN BOG'LANADI!
-
-📱 Telegram: @globuz_support
-☎️ Telefon: +998 90 123 45 67
-
-Bizni tanlaganingiz uchun rahmat! 🙏`,
-		session.Name,
-		session.SelectedVisa,
-		visa.Flag,
-		session.SelectedVisa,
-		visa.ServicePrice,
-		visa.VisaFee,
-		visa.ProcessingTime)
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🆕 Yangi ariza", "new_application"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Narxlar", "prices"),
-			tgbotapi.NewInlineKeyboardButtonData("📞 Operator", "operator"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Asosiy menyu", "back_main"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Bog'lanish ma'lumotlari
-func showContact(userID int64) {
-	text := `📞 OPERATOR BILAN BOG'LANISH
-
-🚀 Tez yordam olish uchun:
-
-📱 Telegram: @globuz_support
-☎️ Telefon: +998 90 123 45 67
-☎️ Qo'shimcha: +998 95 123 45 67
-📧 Email: info@globuzvisa.uz
-
-⏰ Ish vaqti:
-9:00-18:00 (Dush-Juma)
-10:00-16:00 (Shanba)
-
-🔥 Operator 15 daqiqa ichida javob beradi!
-📋 Arizangiz tafsilotlarini tayyorlab qo'ying 👇`
-
-	keyboard := tgbotapi.NewInlineKeyboardMarkup(
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🆕 Yangi ariza", "new_application"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("💰 Narxlar", "prices"),
-		),
-		tgbotapi.NewInlineKeyboardRow(
-			tgbotapi.NewInlineKeyboardButtonData("🔙 Asosiy menyu", "back_main"),
-		),
-	)
-
-	msg := tgbotapi.NewMessage(userID, text)
-	msg.ReplyMarkup = keyboard
-	bot.Send(msg)
-}
-
-// Adminlarga guruhlar ro'yxatini ko'rsatish
-func showGroupsList(userID int64) {
-	if len(monitoredGroups) == 0 {
-		msg := tgbotapi.NewMessage(userID, "📋 Hozircha kuzatilayotgan guruhlar yo'q.")
-		bot.Send(msg)
-		return
-	}
-
-	text := "📋 KUZATILAYOTGAN GURUHLAR:\n\n"
-
-	for _, group := range monitoredGroups {
-		status := "🔴 Faol emas"
-		if group.IsActive {
-			status = "🟢 Faol"
-		}
-
-		text += fmt.Sprintf("🏢 %s\n📊 ID: %d\n%s\n👥 Adminlar: %d ta\n⏰ Qo'shilgan: %s\n\n",
-			group.GroupTitle,
-			group.GroupID,
-			status,
-			len(group.AdminIDs),
-			group.JoinedAt.Format("02.01.2006 15:04"))
-	}
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Statistikani ko'rsatish
-func showStats(userID int64) {
-	totalPending := 0
-	totalAnswered := 0
-
-	for _, msg := range pendingMessages {
-		if msg.Status == "pending" {
-			totalPending++
-		} else if msg.Status == "answered" {
-			totalAnswered++
-		}
-	}
-
-	text := fmt.Sprintf(`📊 BOT STATISTIKASI
-
-🏢 Kuzatilayotgan guruhlar: %d ta
-🔔 Javobsiz xabarlar: %d ta
-✅ Javob berilgan: %d ta
-📝 Jami xabarlar: %d ta
-
-👨‍💼 Global adminlar: %d ta`,
-		len(monitoredGroups),
-		totalPending,
-		totalAnswered,
-		len(pendingMessages))
-
-	msg := tgbotapi.NewMessage(userID, text)
-	bot.Send(msg)
-}
-
-// Barcha adminlardan eslatma xabarlarini o'chirish - TO'G'RILANGAN VERSIYA
-func deleteReminderMessages(pendingMsg *PendingMessage) {
-	if pendingMsg.ReminderMessageIDs == nil {
+// Barcha yuborilgan eslatma xabarlarini o'chirish
+func deleteSentMessages(pendingMsg *PendingMessage) {
+	if len(pendingMsg.SentMessageIDs) == 0 {
 		return
 	}
 
 	deletedCount := 0
-	for chatID, messageID := range pendingMsg.ReminderMessageIDs {
-		deleteMsg := tgbotapi.NewDeleteMessage(chatID, messageID)
+	for _, messageID := range pendingMsg.SentMessageIDs {
+		deleteMsg := tgbotapi.NewDeleteMessage(ADMIN_CHAT_ID, messageID)
 		_, err := bot.Request(deleteMsg)
 		if err != nil {
-			log.Printf("❌ Chat %d dan xabar %d ni o'chirishda xato: %v", chatID, messageID, err)
+			log.Printf("❌ Admin guruhdan xabar %d ni o'chirishda xato: %v", messageID, err)
 		} else {
 			deletedCount++
-			log.Printf("🗑️ Chat %d dan eslatma xabari o'chirildi (MSG ID: %d)", chatID, messageID)
+			log.Printf("🗑️ Admin guruhdan eslatma xabari o'chirildi (MSG ID: %d)", messageID)
 		}
 	}
 
 	log.Printf("🗑️ Jami %d ta eslatma xabari o'chirildi", deletedCount)
 
-	// ReminderMessageIDs ni tozalash
-	pendingMsg.ReminderMessageIDs = make(map[int64]int)
+	// SentMessageIDs ni tozalash
+	pendingMsg.SentMessageIDs = []int{}
 }
